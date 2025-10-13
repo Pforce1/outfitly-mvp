@@ -7,6 +7,6 @@
     "assetBundlePatterns": ["**/*"],
     "ios": { "supportsTablet": true },
     "android": {},
-    "web": { "bundler": "metro", "output": "development" }
+    "web": { "bundler": "metro", "output": "single" }
   }
 }
