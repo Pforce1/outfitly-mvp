@@ -68,8 +68,8 @@ Analyze the clothing in the image and return ONLY valid JSON:
 {
   "description": string,                  // 1 short sentence
   "aesthetics": string[],                 // 3-5 vibes (e.g., minimal, streetwear)
-  "palette": string[],                    // up to 5 HEX colors like "#AABBCC"
-  "suggestions": string[]                 // 3 short outfit pairings or styling ideas
+  "palette": string[],                    // up to 5 complementary HEX colors like "#AABBCC"
+  "suggestions": string[]                 // 5 short outfit pairings or styling ideas
 }
 No markdown, no comments—just JSON.
               `.trim()
