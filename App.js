@@ -21,6 +21,7 @@ import { OPENAI_API_KEY, FASHN_API_KEY } from "@env";
 const GRADIENT = ["#1956a7", "#b764d6"]; // Outfitly brand gradient
 const SAVED_KEY = "savedPieces";
 const OUTFITS_KEY = "savedOutfits";
+const USER_MODEL_PHOTO_KEY = "userModelPhoto";
 
 export default function App() {
   const [imageUri, setImageUri] = useState(null);
@@ -40,13 +41,22 @@ export default function App() {
   const [currentView, setCurrentView] = useState("main"); // "main" or "outfits"
   const [outfitsList, setOutfitsList] = useState([]);
   const [selectedOutfit, setSelectedOutfit] = useState(null);
+  
+  // User model photo state
+  const [userModelPhoto, setUserModelPhoto] = useState(null);
 
-  // Load saved count at boot
+  // Load saved count and user model photo at boot
   useEffect(() => {
     (async () => {
       try {
         const arr = await readSaved();
         setSavedCount(arr.length);
+        
+        // Load user model photo if saved
+        const savedPhoto = await AsyncStorage.getItem(USER_MODEL_PHOTO_KEY);
+        if (savedPhoto) {
+          setUserModelPhoto(savedPhoto);
+        }
       } catch {}
     })();
   }, []);
@@ -71,6 +81,36 @@ export default function App() {
   async function writeOutfits(arr) {
     await AsyncStorage.setItem(OUTFITS_KEY, JSON.stringify(arr));
     setOutfitsList(arr);
+  }
+  
+  // Delete outfit function
+  async function deleteOutfit(outfitId) {
+    Alert.alert(
+      "Delete Outfit?",
+      "This outfit will be permanently deleted.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const outfits = await readOutfits();
+              const filtered = outfits.filter(o => o.id !== outfitId);
+              await writeOutfits(filtered);
+              
+              // If deleted outfit was selected, clear selection
+              if (selectedOutfit?.id === outfitId) {
+                setSelectedOutfit(null);
+              }
+            } catch (error) {
+              console.error("Failed to delete outfit:", error);
+              Alert.alert("Error", "Failed to delete outfit.");
+            }
+          }
+        }
+      ]
+    );
   }
   
   // Load outfits list
@@ -106,6 +146,69 @@ export default function App() {
       setResult(null);
       setImageUri(res.assets[0].uri);
     }
+  }
+
+  // User model photo functions
+  async function captureUserModelPhoto() {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== "granted") {
+      return Alert.alert("Permission required", "Camera access is needed to take your model photo.");
+    }
+    const res = await ImagePicker.launchCameraAsync({ 
+      quality: 0.9,
+      allowsEditing: true,
+      aspect: [3, 4] // Portrait aspect ratio for full body
+    });
+    if (!res.canceled) {
+      await saveUserModelPhoto(res.assets[0].uri);
+      Alert.alert("Success", "Your model photo has been saved! It will be used for outfit try-ons.");
+    }
+  }
+
+  async function pickUserModelPhoto() {
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.9,
+      allowsEditing: true,
+      aspect: [3, 4] // Portrait aspect ratio for full body
+    });
+    if (!res.canceled) {
+      await saveUserModelPhoto(res.assets[0].uri);
+      Alert.alert("Success", "Your model photo has been saved! It will be used for outfit try-ons.");
+    }
+  }
+
+  async function saveUserModelPhoto(uri) {
+    try {
+      await AsyncStorage.setItem(USER_MODEL_PHOTO_KEY, uri);
+      setUserModelPhoto(uri);
+    } catch (error) {
+      console.error("Failed to save user model photo:", error);
+      Alert.alert("Error", "Failed to save your model photo.");
+    }
+  }
+
+  async function removeUserModelPhoto() {
+    Alert.alert(
+      "Remove Model Photo?",
+      "Your saved model photo will be removed. Outfits will use AI-generated models instead.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await AsyncStorage.removeItem(USER_MODEL_PHOTO_KEY);
+              setUserModelPhoto(null);
+              Alert.alert("Removed", "Your model photo has been removed.");
+            } catch (error) {
+              console.error("Failed to remove user model photo:", error);
+            }
+          }
+        }
+      ]
+    );
   }
 
   async function analyze() {
@@ -434,7 +537,7 @@ IMPORTANT:
     }
   }
 
-  // FASHN API Integration: Generate model image with outfit
+  // FASHN API Integration: Generate model image with outfit using Virtual Try-On
   async function generateFashnOutfit(selectedItems, outfitSelection) {
     if (!FASHN_API_KEY) {
       Alert.alert("Missing FASHN API Key", "Set FASHN_API_KEY in .env file.");
@@ -443,259 +546,544 @@ IMPORTANT:
     }
 
     try {
-      // Build a detailed, explicit prompt for FASHN that ONLY uses the exact items described
-      const itemDescriptions = selectedItems.map((item, idx) => {
-        const desc = item.result?.description || "clothing item";
-        const colors = item.result?.palette?.join(", ") || "";
-        const style = item.result?.aesthetics?.join(", ") || "";
-        return `Item ${idx + 1}: ${desc}${colors ? ` (Colors: ${colors})` : ""}${style ? ` (Style: ${style})` : ""}`;
-      }).join(". ");
-
-      const itemCount = selectedItems.length;
-      const prompt = `A professional fashion model wearing EXACTLY ${itemCount} clothing items from the user's personal closet. 
-
-THE EXACT ITEMS TO USE (USE ONLY THESE, NO OTHERS):
-${itemDescriptions}
-
-ABSOLUTE REQUIREMENTS - DO NOT VIOLATE:
-1. The model must wear EXACTLY these ${itemCount} items listed above
-2. DO NOT add any clothing items, accessories, shoes, or garments that are NOT in the list above
-3. DO NOT generate, create, or invent any items not explicitly listed
-4. DO NOT add hoodies, jackets, or any outerwear unless explicitly listed above
-5. If an item is not in the list above, DO NOT include it in the outfit
-6. Show ONLY the ${itemCount} items from the list, nothing more, nothing less
-
-Outfit description: ${outfitSelection.outfitDescription || "A cohesive outfit"}
-Style: ${outfitSelection.style || "casual"}
-Color scheme: ${outfitSelection.colorScheme || "harmonious"}
-
-Photography style: High quality fashion photography, studio lighting, full body shot, neutral background.`;
-
-      // Call FASHN API (using SDK pattern)
-      // The API returns an ID, then we need to poll for the result
-      const res = await fetch("https://api.fashn.ai/v1/run", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${FASHN_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model_name: "model-create",
-          inputs: {
-            prompt: prompt
-          }
-        }),
+      // Convert clothing item images to base64 for FASHN API
+      console.log("Converting clothing images to base64...");
+      const imagePromises = selectedItems.map(async (item) => {
+        try {
+          const processed = await ImageManipulator.manipulateAsync(
+            item.imageUri,
+            [{ resize: { width: 512 } }], // Resize for API efficiency
+            { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+          );
+          return {
+            base64: processed.base64 ? `data:image/jpeg;base64,${processed.base64}` : null,
+            item: item
+          };
+        } catch (error) {
+          console.warn(`Failed to process image for item ${item.id}:`, error);
+          return { base64: null, item };
+        }
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`FASHN API error ${res.status}: ${text}`);
+      const imageData = (await Promise.all(imagePromises)).filter(img => img.base64 !== null);
+      console.log(`Successfully converted ${imageData.length} images to base64`);
+
+      if (imageData.length === 0) {
+        throw new Error("No valid clothing images to process");
       }
 
-      let data = await res.json();
+      // Step 1: Get model image - use user photo if available, otherwise generate one
+      let modelImageUrl = null;
       
-      // Log the full response for debugging
-      console.log("FASHN API full response:", JSON.stringify(data, null, 2));
-      
-      // Check if the response already contains the output (synchronous response)
-      const hasOutput = data.output && (
-        (Array.isArray(data.output) && data.output.length > 0) ||
-        typeof data.output === 'string' ||
-        data.output.url ||
-        data.output.image_url
-      );
-      
-      // Only poll if we have a prediction ID and no output yet
-      if ((data.id || data.prediction_id) && !hasOutput) {
-        const predictionId = data.id || data.prediction_id;
-        console.log("Polling for prediction result, ID:", predictionId);
+      if (userModelPhoto) {
+        // Use user's photo as model
+        console.log("Using user's model photo...");
+        // Convert user photo to base64 for API
+        try {
+          const processed = await ImageManipulator.manipulateAsync(
+            userModelPhoto,
+            [{ resize: { width: 512 } }],
+            { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+          );
+          modelImageUrl = processed.base64 ? `data:image/jpeg;base64,${processed.base64}` : userModelPhoto;
+          console.log("User model photo processed");
+        } catch (error) {
+          console.warn("Failed to process user photo, using URI directly:", error);
+          modelImageUrl = userModelPhoto;
+        }
+      } else {
+        // Generate a base model using model-create
+        console.log("Generating base model...");
+        const modelPrompt = `A professional fashion model, full body shot, neutral pose, studio lighting, neutral background. ${outfitSelection.style ? `Style: ${outfitSelection.style}` : ""}`;
         
-        // Poll using multiple possible endpoints (SDK pattern)
-        let pollAttempts = 0;
-        const maxPollAttempts = 60; // 5 minutes max (5 second intervals)
-        let pollData = null;
-        
-        // Try different polling endpoint patterns based on common API patterns
-        // The SDK likely uses one of these patterns internally
-        const pollingEndpoints = [
-          // Most common: predictions endpoint
-          `https://api.fashn.ai/v1/predictions/${predictionId}`,
-          // Alternative: run endpoint with ID query param
-          `https://api.fashn.ai/v1/run?id=${predictionId}`,
-          // Alternative: status endpoint
-          `https://api.fashn.ai/v1/status/${predictionId}`,
-          // Alternative: GET on run with ID in path
-          `https://api.fashn.ai/v1/run/${predictionId}`,
-        ];
-        
-        while (pollAttempts < maxPollAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds
-          
-          let lastError = null;
-          
-          // Try each endpoint pattern
-          for (const endpoint of pollingEndpoints) {
+        const modelRes = await fetch("https://api.fashn.ai/v1/run", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${FASHN_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model_name: "model-create",
+            inputs: {
+              prompt: modelPrompt
+            }
+          }),
+        });
+
+        if (!modelRes.ok) {
+          const text = await modelRes.text();
+          throw new Error(`FASHN model creation error ${modelRes.status}: ${text}`);
+        }
+
+        let modelData = await modelRes.json();
+        console.log("Model creation response:", JSON.stringify(modelData, null, 2));
+
+        // Poll for model if needed
+        if (modelData.id && !modelData.output) {
+          const modelId = modelData.id;
+          let pollAttempts = 0;
+          while (pollAttempts < 30) {
+            await new Promise(resolve => setTimeout(resolve, 3000));
             try {
-              const statusRes = await fetch(endpoint, {
+              const statusRes = await fetch(`https://api.fashn.ai/v1/predictions/${modelId}`, {
                 method: "GET",
                 headers: {
                   "Authorization": `Bearer ${FASHN_API_KEY}`,
                   "Content-Type": "application/json",
                 },
               });
-              
               if (statusRes.ok) {
-                pollData = await statusRes.json();
-                console.log(`Poll attempt ${pollAttempts + 1} (${endpoint}):`, JSON.stringify(pollData, null, 2));
-                
-                // Check if completed
-                if (pollData.output && (
-                  (Array.isArray(pollData.output) && pollData.output.length > 0) ||
-                  typeof pollData.output === 'string' ||
-                  pollData.output.url ||
-                  pollData.output.image_url
-                )) {
-                  data = pollData;
-                  console.log("Polling successful, got output!");
-                  break;
-                } else if (pollData.status === 'succeeded' || pollData.status === 'completed') {
-                  // Status says succeeded, check for output
-                  if (pollData.output) {
-                    data = pollData;
-                    break;
+                modelData = await statusRes.json();
+                if (modelData.output) break;
+              } else if (statusRes.status === 404) {
+                break; // Use initial response
+              }
+            } catch (e) {
+              break;
+            }
+            pollAttempts++;
+          }
+        }
+
+        // Extract model image URL
+        if (modelData.output) {
+          if (Array.isArray(modelData.output) && modelData.output.length > 0) {
+            modelImageUrl = typeof modelData.output[0] === 'string' ? modelData.output[0] : modelData.output[0].url || modelData.output[0].image_url;
+          } else if (typeof modelData.output === 'string') {
+            modelImageUrl = modelData.output;
+          } else if (modelData.output.url) {
+            modelImageUrl = modelData.output.url;
+          } else if (modelData.output.image_url) {
+            modelImageUrl = modelData.output.image_url;
+          }
+        }
+
+        if (!modelImageUrl) {
+          throw new Error("Failed to generate base model image");
+        }
+
+        console.log("Base model image URL:", modelImageUrl);
+      }
+
+      // Step 2: Apply garments using Virtual Try-On
+      // For multiple garments, we'll apply them sequentially
+      // Start with the first garment, then use the result as the model for the next
+      let currentModelImage = modelImageUrl;
+      
+      // Determine garment categories (tops, bottoms, accessories, etc.)
+      const categorizeItem = (item) => {
+        const desc = (item.result?.description || "").toLowerCase();
+        
+        // Clothing items for Virtual Try-On
+        if (desc.includes("shirt") || desc.includes("top") || desc.includes("blouse") || desc.includes("sweater") || desc.includes("t-shirt") || desc.includes("jacket") || desc.includes("hoodie")) {
+          return "tops";
+        } else if (desc.includes("pant") || desc.includes("jean") || desc.includes("trouser") || desc.includes("bottom") || desc.includes("skirt") || desc.includes("short")) {
+          return "bottoms";
+        } else if (desc.includes("dress")) {
+          return "one-pieces";
+        }
+        // Accessories - will use Product to Model
+        else if (desc.includes("hat") || desc.includes("cap") || desc.includes("beanie") || desc.includes("head")) {
+          return "accessory-hat";
+        } else if (desc.includes("shoe") || desc.includes("sneaker") || desc.includes("boot") || desc.includes("footwear") || desc.includes("sandal")) {
+          return "accessory-shoe";
+        } else if (desc.includes("bag") || desc.includes("purse") || desc.includes("backpack") || desc.includes("accessory") || desc.includes("jewelry") || desc.includes("watch")) {
+          return "accessory-other";
+        }
+        
+        return "tops"; // Default to tops
+      };
+
+      // Separate items into try-on items and accessories
+      const tryOnItems = imageData.filter(item => {
+        const cat = categorizeItem(item.item);
+        return cat === "tops" || cat === "bottoms" || cat === "one-pieces";
+      });
+      
+      const accessoryItems = imageData.filter(item => {
+        const cat = categorizeItem(item.item);
+        return cat.startsWith("accessory-");
+      });
+
+      // Sort try-on items: tops first, then bottoms, then one-pieces
+      const sortedItems = [...tryOnItems].sort((a, b) => {
+        const catA = categorizeItem(a.item);
+        const catB = categorizeItem(b.item);
+        const order = { "tops": 1, "bottoms": 2, "one-pieces": 3 };
+        return (order[catA] || 4) - (order[catB] || 4);
+      });
+      
+      console.log(`Found ${sortedItems.length} clothing items for try-on and ${accessoryItems.length} accessories`);
+
+      console.log(`Applying ${sortedItems.length} garments sequentially...`);
+
+      // Apply each garment sequentially
+      for (let i = 0; i < sortedItems.length; i++) {
+        const garmentData = sortedItems[i];
+        const category = categorizeItem(garmentData.item);
+        
+        console.log(`Applying garment ${i + 1}/${sortedItems.length} (${category})...`);
+        console.log(`Model image type: ${typeof currentModelImage}, starts with data: ${currentModelImage?.startsWith('data:')}`);
+        console.log(`Garment image type: ${typeof garmentData.base64}, starts with data: ${garmentData.base64?.startsWith('data:')}`);
+
+        const tryonRes = await fetch("https://api.fashn.ai/v1/run", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${FASHN_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model_name: "tryon-v1.6",
+            inputs: {
+              model_image: currentModelImage,
+              garment_image: garmentData.base64,
+              category: category
+            }
+          }),
+        });
+
+        if (!tryonRes.ok) {
+          const text = await tryonRes.text();
+          console.error(`Try-on ${i + 1} failed with status ${tryonRes.status}: ${text}`);
+          throw new Error(`Failed to apply garment ${i + 1}: ${text}`);
+        }
+
+        let tryonData = await tryonRes.json();
+        console.log(`Try-on ${i + 1} initial response:`, JSON.stringify(tryonData, null, 2));
+
+        // Check if result is already in initial response
+        const hasOutputInInitial = tryonData.output && (
+          (Array.isArray(tryonData.output) && tryonData.output.length > 0) ||
+          typeof tryonData.output === 'string' ||
+          (tryonData.output && typeof tryonData.output === 'object' && (tryonData.output.url || tryonData.output.image_url))
+        );
+
+        // Poll for try-on result if needed (only if we have an ID and no output yet)
+        if (tryonData.id && !hasOutputInInitial) {
+          const tryonId = tryonData.id;
+          console.log(`Polling for try-on result, ID: ${tryonId}`);
+          
+          // Wait a bit first - API needs time to process (try-on takes 5-17 seconds)
+          await new Promise(resolve => setTimeout(resolve, 8000));
+          
+          let pollAttempts = 0;
+          const maxPollAttempts = 20; // Reduced since we wait longer between attempts
+          let foundResult = false;
+          
+          while (pollAttempts < maxPollAttempts && !foundResult) {
+            await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds between polls
+            
+            try {
+              // Try multiple endpoint patterns
+              const endpoints = [
+                `https://api.fashn.ai/v1/predictions/${tryonId}`,
+                `https://api.fashn.ai/v1/run/${tryonId}`,
+                `https://api.fashn.ai/v1/status/${tryonId}`,
+              ];
+              
+              let pollResponse = null;
+              
+              for (const endpoint of endpoints) {
+                try {
+                  const statusRes = await fetch(endpoint, {
+                    method: "GET",
+                    headers: {
+                      "Authorization": `Bearer ${FASHN_API_KEY}`,
+                      "Content-Type": "application/json",
+                    },
+                  });
+                  
+                  if (statusRes.ok) {
+                    pollResponse = await statusRes.json();
+                    console.log(`Poll attempt ${pollAttempts + 1} (${endpoint}):`, JSON.stringify(pollResponse, null, 2));
+                    break; // Found working endpoint
+                  } else if (statusRes.status !== 404) {
+                    console.log(`Endpoint ${endpoint} returned ${statusRes.status}`);
                   }
-                } else if (pollData.status === 'failed' || pollData.status === 'error') {
-                  throw new Error(`FASHN generation failed: ${pollData.error || 'Unknown error'}`);
-                } else if (pollData.status === 'processing' || pollData.status === 'pending') {
-                  // Still processing, continue polling
+                } catch (e) {
+                  // Try next endpoint
+                  continue;
+                }
+              }
+              
+              // If no endpoint worked, try POST with ID
+              if (!pollResponse) {
+                try {
+                  const postRes = await fetch("https://api.fashn.ai/v1/run", {
+                    method: "POST",
+                    headers: {
+                      "Authorization": `Bearer ${FASHN_API_KEY}`,
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      id: tryonId
+                    }),
+                  });
+                  
+                  if (postRes.ok) {
+                    pollResponse = await postRes.json();
+                    console.log(`Poll attempt ${pollAttempts + 1} (POST with ID):`, JSON.stringify(pollResponse, null, 2));
+                  }
+                } catch (e) {
+                  console.warn("POST polling failed:", e);
+                }
+              }
+              
+              if (pollResponse) {
+                // Check if we got output
+                if (pollResponse.output && (
+                  (Array.isArray(pollResponse.output) && pollResponse.output.length > 0) ||
+                  typeof pollResponse.output === 'string' ||
+                  (pollResponse.output && typeof pollResponse.output === 'object')
+                )) {
+                  tryonData = pollResponse;
+                  foundResult = true;
+                  console.log("✅ Got output from polling!");
                   break;
                 }
-              } else if (statusRes.status !== 404) {
-                // 404 is expected for wrong endpoint, but other errors might be informative
-                console.log(`Endpoint ${endpoint} returned ${statusRes.status}`);
+                
+                // Check status
+                if (pollResponse.status === 'succeeded' || pollResponse.status === 'completed') {
+                  if (pollResponse.output) {
+                    tryonData = pollResponse;
+                    foundResult = true;
+                    break;
+                  }
+                } else if (pollResponse.status === 'failed' || pollResponse.status === 'error') {
+                  throw new Error(`Try-on failed: ${pollResponse.error || 'Unknown error'}`);
+                } else if (pollResponse.status === 'processing' || pollResponse.status === 'pending') {
+                  console.log(`Still processing... (attempt ${pollAttempts + 1})`);
+                  // Continue polling
+                }
+              } else {
+                console.log(`No response from polling endpoints (attempt ${pollAttempts + 1})`);
               }
-            } catch (pollError) {
-              lastError = pollError;
-              // Continue to next endpoint
+            } catch (e) {
+              console.warn(`Polling error:`, e);
+              // Continue trying
+            }
+            pollAttempts++;
+          }
+          
+          if (!foundResult && pollAttempts >= maxPollAttempts) {
+            console.warn(`Polling timeout for garment ${i + 1}, will check initial response structure`);
+            // Don't throw error yet - maybe result is in initial response in a different format
+          }
+        } else if (hasOutputInInitial) {
+          console.log("✅ Result found in initial response!");
+        }
+
+        // Extract result image URL - try multiple possible structures
+        let resultImageUrl = null;
+        
+        // First, check if output exists and extract it
+        if (tryonData.output) {
+          if (Array.isArray(tryonData.output)) {
+            if (tryonData.output.length > 0) {
+              const first = tryonData.output[0];
+              if (typeof first === 'string') {
+                resultImageUrl = first;
+              } else if (first && typeof first === 'object') {
+                resultImageUrl = first.url || first.image_url || first.image || first.output || first.result;
+              }
+            }
+          } else if (typeof tryonData.output === 'string') {
+            resultImageUrl = tryonData.output;
+          } else if (tryonData.output && typeof tryonData.output === 'object') {
+            resultImageUrl = tryonData.output.url || tryonData.output.image_url || tryonData.output.image || tryonData.output.output || tryonData.output.result;
+          }
+        }
+        
+        // Fallback: check other possible response structures
+        if (!resultImageUrl) {
+          // Check top-level properties
+          if (tryonData.url) resultImageUrl = tryonData.url;
+          else if (tryonData.image_url) resultImageUrl = tryonData.image_url;
+          else if (tryonData.image) resultImageUrl = tryonData.image;
+          else if (tryonData.result) {
+            if (Array.isArray(tryonData.result) && tryonData.result.length > 0) {
+              const first = tryonData.result[0];
+              resultImageUrl = typeof first === 'string' ? first : (first.url || first.image_url || first.image);
+            } else if (typeof tryonData.result === 'string') {
+              resultImageUrl = tryonData.result;
+            } else if (tryonData.result && typeof tryonData.result === 'object') {
+              resultImageUrl = tryonData.result.url || tryonData.result.image_url || tryonData.result.image;
             }
           }
-          
-          // If we got output, break out of polling loop
-          if (data.output && (
-            (Array.isArray(data.output) && data.output.length > 0) ||
-            typeof data.output === 'string' ||
-            data.output.url ||
-            data.output.image_url
-          )) {
-            break;
+          // Check data property
+          else if (tryonData.data) {
+            if (Array.isArray(tryonData.data) && tryonData.data.length > 0) {
+              const first = tryonData.data[0];
+              resultImageUrl = typeof first === 'string' ? first : (first.url || first.image_url || first.image);
+            } else if (typeof tryonData.data === 'string') {
+              resultImageUrl = tryonData.data;
+            } else if (tryonData.data && typeof tryonData.data === 'object') {
+              resultImageUrl = tryonData.data.url || tryonData.data.image_url || tryonData.data.image;
+            }
           }
+        }
+
+        // If still no result and we have an ID, try making the original request again
+        // Some APIs return the result when you make the same request again after processing
+        if (!resultImageUrl && tryonData.id) {
+          console.log("No result found in response, waiting longer and retrying original request...");
+          await new Promise(resolve => setTimeout(resolve, 15000)); // Wait 15 seconds for processing
           
-          pollAttempts++;
-        }
-        
-        if (pollAttempts >= maxPollAttempts && !pollData) {
-          throw new Error("FASHN API polling timeout - generation took too long. The API may be experiencing delays.");
-        }
-        
-        // If we still don't have output after polling, try making another POST request
-        // Some APIs require you to check status by making the same request again
-        if (!data.output || (
-          !(Array.isArray(data.output) && data.output.length > 0) &&
-          typeof data.output !== 'string' &&
-          !data.output.url &&
-          !data.output.image_url
-        )) {
-          console.log("Attempting status check via POST with ID...");
           try {
-            // Try POST with ID in body (some APIs work this way)
-            const statusRes = await fetch(`https://api.fashn.ai/v1/run`, {
+            // Make the same try-on request again - API might return result now
+            const retryRes = await fetch("https://api.fashn.ai/v1/run", {
               method: "POST",
               headers: {
                 "Authorization": `Bearer ${FASHN_API_KEY}`,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                id: predictionId,
-                model_name: "model-create"
+                model_name: "tryon-v1.6",
+                inputs: {
+                  model_image: currentModelImage,
+                  garment_image: garmentData.base64,
+                  category: category
+                }
               }),
             });
             
-            if (statusRes.ok) {
-              const statusData = await statusRes.json();
-              console.log("Status check response:", JSON.stringify(statusData, null, 2));
-              if (statusData.output) {
-                data = statusData;
+            if (retryRes.ok) {
+              const retryData = await retryRes.json();
+              console.log("Retry request response:", JSON.stringify(retryData, null, 2));
+              
+              // Try extracting from retry response using same logic
+              if (retryData.output) {
+                if (Array.isArray(retryData.output) && retryData.output.length > 0) {
+                  const first = retryData.output[0];
+                  resultImageUrl = typeof first === 'string' ? first : (first.url || first.image_url || first.image);
+                } else if (typeof retryData.output === 'string') {
+                  resultImageUrl = retryData.output;
+                } else if (retryData.output && typeof retryData.output === 'object') {
+                  resultImageUrl = retryData.output.url || retryData.output.image_url || retryData.output.image;
+                }
+              }
+              
+              // Update tryonData if we got a result
+              if (resultImageUrl) {
+                tryonData = retryData;
               }
             }
-          } catch (e) {
-            console.warn("Status check POST failed:", e);
+          } catch (retryError) {
+            console.warn("Retry attempt failed:", retryError);
           }
         }
-      }
-      
-      // FASHN API response structure: output is an array of URLs
-      let imageUrl = null;
-      
-      // According to docs: "The output array contains URLs to your generated fashion model image"
-      if (data.output) {
-        if (Array.isArray(data.output)) {
-          // Array of URLs (strings) or array of objects with url/image_url
-          if (data.output.length > 0) {
-            const firstOutput = data.output[0];
-            if (typeof firstOutput === 'string') {
-              imageUrl = firstOutput;
-            } else if (firstOutput.url) {
-              imageUrl = firstOutput.url;
-            } else if (firstOutput.image_url) {
-              imageUrl = firstOutput.image_url;
-            } else if (firstOutput.image) {
-              imageUrl = firstOutput.image;
-            }
-          }
-        } else if (typeof data.output === 'string') {
-          imageUrl = data.output;
-        } else if (data.output.url) {
-          imageUrl = data.output.url;
-        } else if (data.output.image_url) {
-          imageUrl = data.output.image_url;
-        }
-      }
-      
-      // Fallback: check other possible structures
-      if (!imageUrl) {
-        if (Array.isArray(data) && data.length > 0) {
-          const first = data[0];
-          imageUrl = typeof first === 'string' ? first : (first.url || first.image_url || first.image);
-        } else if (data.image_url) {
-          imageUrl = data.image_url;
-        } else if (data.url) {
-          imageUrl = data.url;
-        } else if (data.image) {
-          imageUrl = data.image;
-        } else if (data.result) {
-          if (Array.isArray(data.result) && data.result.length > 0) {
-            const first = data.result[0];
-            imageUrl = typeof first === 'string' ? first : (first.url || first.image_url);
-          } else if (typeof data.result === 'string') {
-            imageUrl = data.result;
-          } else {
-            imageUrl = data.result.url || data.result.image_url;
-          }
-        } else if (typeof data === 'string') {
-          imageUrl = data;
+
+        if (resultImageUrl) {
+          currentModelImage = resultImageUrl; // Use result as model for next garment
+          console.log(`✅ Garment ${i + 1} applied successfully! Result URL: ${resultImageUrl.substring(0, 80)}...`);
+        } else {
+          console.error(`❌ Failed to extract result for garment ${i + 1}.`);
+          console.error(`Full response structure:`, JSON.stringify(tryonData, null, 2));
+          console.error(`Response keys:`, Object.keys(tryonData));
+          throw new Error(`Failed to get result image for garment ${i + 1}. Check console logs for the full API response. The API returned: ${JSON.stringify(tryonData).substring(0, 200)}...`);
         }
       }
 
-      if (!imageUrl) {
-        console.error("FASHN API response structure:", JSON.stringify(data, null, 2));
-        Alert.alert(
-          "Image URL not found", 
-          "The FASHN API returned a response but the image URL couldn't be found. Check the console logs for the full response structure."
-        );
-        throw new Error("FASHN API did not return an image. Check console for response structure.");
+      // Step 3: Apply accessories using Product to Model endpoint
+      if (accessoryItems.length > 0 && currentModelImage) {
+        console.log(`Applying ${accessoryItems.length} accessories using Product to Model...`);
+        
+        for (let i = 0; i < accessoryItems.length; i++) {
+          const accessoryData = accessoryItems[i];
+          const accessoryType = categorizeItem(accessoryData.item);
+          
+          console.log(`Applying accessory ${i + 1}/${accessoryItems.length} (${accessoryType})...`);
+          
+          try {
+            // Use Product to Model in try-on mode to add accessory to existing model
+            const productRes = await fetch("https://api.fashn.ai/v1/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${FASHN_API_KEY}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                model_name: "product-to-model",
+                inputs: {
+                  product_image: accessoryData.base64,
+                  model_image: currentModelImage,
+                  mode: "tryon" // Try-on mode adds product to existing model
+                }
+              }),
+            });
+
+            if (!productRes.ok) {
+              const text = await productRes.text();
+              console.warn(`Product to Model for accessory ${i + 1} failed: ${text}`);
+              // Continue with next accessory if one fails
+              continue;
+            }
+
+            let productData = await productRes.json();
+            console.log(`Product to Model ${i + 1} response:`, JSON.stringify(productData, null, 2));
+
+            // Poll for result if needed (similar to try-on)
+            if (productData.id && !productData.output) {
+              const productId = productData.id;
+              let pollAttempts = 0;
+              while (pollAttempts < 20) {
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                try {
+                  const statusRes = await fetch(`https://api.fashn.ai/v1/predictions/${productId}`, {
+                    method: "GET",
+                    headers: {
+                      "Authorization": `Bearer ${FASHN_API_KEY}`,
+                      "Content-Type": "application/json",
+                    },
+                  });
+                  if (statusRes.ok) {
+                    productData = await statusRes.json();
+                    if (productData.output) break;
+                  } else if (statusRes.status === 404) {
+                    break;
+                  }
+                } catch (e) {
+                  break;
+                }
+                pollAttempts++;
+              }
+            }
+
+            // Extract result
+            let accessoryResultUrl = null;
+            if (productData.output) {
+              if (Array.isArray(productData.output) && productData.output.length > 0) {
+                const first = productData.output[0];
+                accessoryResultUrl = typeof first === 'string' ? first : (first.url || first.image_url || first.image);
+              } else if (typeof productData.output === 'string') {
+                accessoryResultUrl = productData.output;
+              } else if (productData.output && typeof productData.output === 'object') {
+                accessoryResultUrl = productData.output.url || productData.output.image_url || productData.output.image;
+              }
+            }
+
+            if (accessoryResultUrl) {
+              currentModelImage = accessoryResultUrl;
+              console.log(`✅ Accessory ${i + 1} applied successfully!`);
+            } else {
+              console.warn(`Failed to get result for accessory ${i + 1}`);
+            }
+          } catch (accessoryError) {
+            console.warn(`Error applying accessory ${i + 1}:`, accessoryError);
+            // Continue with next accessory
+          }
+        }
       }
-      
-      console.log("Extracted image URL:", imageUrl);
+
+      const finalImageUrl = currentModelImage;
+      console.log("Final outfit image URL:", finalImageUrl);
+
+      if (!finalImageUrl) {
+        throw new Error("Failed to generate outfit image");
+      }
+
+      // Save the outfit result
+      const imageUrl = finalImageUrl;
 
       // Create outfit object to save
       const outfitData = {
@@ -703,12 +1091,7 @@ Photography style: High quality fashion photography, studio lighting, full body 
         createdAt: new Date().toISOString(),
         selectedItems,
         outfitSelection,
-        modelImageUrl: imageUrl,
-        prompt,
-        fashnInputs: {
-          prompt: prompt,
-          model_name: "model-create"
-        }
+        modelImageUrl: imageUrl
       };
 
       // Save outfit to storage
@@ -735,9 +1118,19 @@ Photography style: High quality fashion photography, studio lighting, full body 
         <SafeAreaView style={{ flex: 1 }}>
           <View style={{ padding: 16, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
             <Text style={{ color: "#fff", fontSize: 22, fontWeight: "800" }}>My Outfits</Text>
-            <Pressable onPress={() => setCurrentView("main")} style={s.btnSmall}>
-              <Text style={s.btnText}>Back</Text>
-            </Pressable>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              {selectedOutfit && (
+                <Pressable
+                  onPress={() => deleteOutfit(selectedOutfit.id)}
+                  style={[s.btnSmall, { backgroundColor: "rgba(255,0,0,0.4)" }]}
+                >
+                  <Text style={s.btnText}>🗑️ Delete</Text>
+                </Pressable>
+              )}
+              <Pressable onPress={() => setCurrentView("main")} style={s.btnSmall}>
+                <Text style={s.btnText}>Back</Text>
+              </Pressable>
+            </View>
           </View>
 
           <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
@@ -758,19 +1151,6 @@ Photography style: High quality fashion photography, studio lighting, full body 
                   </View>
                 )}
 
-                {/* FASHN API Input Details */}
-                <View style={s.card}>
-                  <Text style={s.cardH}>FASHN API Input</Text>
-                  <Text style={[s.cardP, { fontSize: 12, opacity: 0.9, marginTop: 4 }]}>
-                    Model: {selectedOutfit.fashnInputs?.model_name || "model-create"}
-                  </Text>
-                  <Text style={[s.cardP, { fontSize: 12, opacity: 0.9, marginTop: 8 }]}>
-                    Prompt:
-                  </Text>
-                  <Text style={[s.cardP, { fontSize: 11, opacity: 0.8, marginTop: 4, fontFamily: "monospace" }]}>
-                    {selectedOutfit.prompt || selectedOutfit.fashnInputs?.prompt || "N/A"}
-                  </Text>
-                </View>
 
                 {/* Outfit Details */}
                 {selectedOutfit.outfitSelection && (
@@ -847,25 +1227,36 @@ Photography style: High quality fashion photography, studio lighting, full body 
                       <Text style={s.cardH}>All Outfits ({outfitsList.length})</Text>
                     </View>
                     {outfitsList.map((outfit) => (
-                      <Pressable
-                        key={outfit.id}
-                        onPress={() => setSelectedOutfit(outfit)}
-                        style={[s.card, { marginBottom: 10, opacity: selectedOutfit?.id === outfit.id ? 1 : 0.8 }]}
-                      >
-                        <Text style={s.cardH}>
-                          Outfit {new Date(outfit.createdAt).toLocaleDateString()}
-                        </Text>
-                        {outfit.modelImageUrl && (
-                          <Image
-                            source={{ uri: outfit.modelImageUrl }}
-                            style={{ width: "100%", height: 200, borderRadius: 8, marginTop: 8 }}
-                            resizeMode="cover"
-                          />
-                        )}
-                        <Text style={[s.cardP, { fontSize: 12, marginTop: 8 }]}>
-                          {outfit.selectedItems?.length || 0} items
-                        </Text>
-                      </Pressable>
+                      <View key={outfit.id} style={[s.card, { marginBottom: 10, opacity: selectedOutfit?.id === outfit.id ? 1 : 0.8 }]}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                          <Pressable 
+                            onPress={() => setSelectedOutfit(outfit)}
+                            style={{ flex: 1 }}
+                          >
+                            <Text style={s.cardH}>
+                              Outfit {new Date(outfit.createdAt).toLocaleDateString()}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => deleteOutfit(outfit.id)}
+                            style={{ padding: 8, backgroundColor: "rgba(255,0,0,0.2)", borderRadius: 6 }}
+                          >
+                            <Text style={[s.btnText, { color: "#ff6b6b", fontSize: 12 }]}>🗑️ Delete</Text>
+                          </Pressable>
+                        </View>
+                        <Pressable onPress={() => setSelectedOutfit(outfit)}>
+                          {outfit.modelImageUrl && (
+                            <Image
+                              source={{ uri: outfit.modelImageUrl }}
+                              style={{ width: "100%", height: 200, borderRadius: 8, marginTop: 8 }}
+                              resizeMode="cover"
+                            />
+                          )}
+                          <Text style={[s.cardP, { fontSize: 12, marginTop: 8 }]}>
+                            {outfit.selectedItems?.length || 0} items
+                          </Text>
+                        </Pressable>
+                      </View>
                     ))}
                   </>
                 )}
@@ -874,25 +1265,36 @@ Photography style: High quality fashion photography, studio lighting, full body 
               <>
                 <Text style={[s.cardH, { marginBottom: 16 }]}>Select an outfit to view:</Text>
                 {outfitsList.map((outfit) => (
-                  <Pressable
-                    key={outfit.id}
-                    onPress={() => setSelectedOutfit(outfit)}
-                    style={[s.card, { marginBottom: 10 }]}
-                  >
-                    <Text style={s.cardH}>
-                      Outfit {new Date(outfit.createdAt).toLocaleDateString()}
-                    </Text>
-                    {outfit.modelImageUrl && (
-                      <Image
-                        source={{ uri: outfit.modelImageUrl }}
-                        style={{ width: "100%", height: 200, borderRadius: 8, marginTop: 8 }}
-                        resizeMode="cover"
-                      />
-                    )}
-                    <Text style={[s.cardP, { fontSize: 12, marginTop: 8 }]}>
-                      {outfit.selectedItems?.length || 0} items
-                    </Text>
-                  </Pressable>
+                  <View key={outfit.id} style={[s.card, { marginBottom: 10 }]}>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <Pressable 
+                        onPress={() => setSelectedOutfit(outfit)}
+                        style={{ flex: 1 }}
+                      >
+                        <Text style={s.cardH}>
+                          Outfit {new Date(outfit.createdAt).toLocaleDateString()}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => deleteOutfit(outfit.id)}
+                        style={{ padding: 8, backgroundColor: "rgba(255,0,0,0.2)", borderRadius: 6 }}
+                      >
+                        <Text style={[s.btnText, { color: "#ff6b6b", fontSize: 12 }]}>🗑️ Delete</Text>
+                      </Pressable>
+                    </View>
+                    <Pressable onPress={() => setSelectedOutfit(outfit)}>
+                      {outfit.modelImageUrl && (
+                        <Image
+                          source={{ uri: outfit.modelImageUrl }}
+                          style={{ width: "100%", height: 200, borderRadius: 8, marginTop: 8 }}
+                          resizeMode="cover"
+                        />
+                      )}
+                      <Text style={[s.cardP, { fontSize: 12, marginTop: 8 }]}>
+                        {outfit.selectedItems?.length || 0} items
+                      </Text>
+                    </Pressable>
+                  </View>
                 ))}
               </>
             ) : (
@@ -911,8 +1313,34 @@ Photography style: High quality fashion photography, studio lighting, full body 
 
   // Main Screen
   return (
-    <LinearGradient colors={GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ flex: 1 }}>
-      <SafeAreaView style={{ flex: 1 }}>
+    <>
+      {/* Full Screen Loading Modal for Outfit Generation */}
+      <Modal
+        visible={outfitBusy}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {}}
+      >
+        <LinearGradient colors={GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ flex: 1 }}>
+          <SafeAreaView style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+            <View style={{ alignItems: "center", padding: 32 }}>
+              <ActivityIndicator size="large" color="#fff" style={{ marginBottom: 24 }} />
+              <Text style={{ color: "#fff", fontSize: 24, fontWeight: "800", marginBottom: 12, textAlign: "center" }}>
+                Creating Your Outfit
+              </Text>
+              <Text style={{ color: "rgba(255,255,255,0.9)", fontSize: 16, textAlign: "center", marginBottom: 8 }}>
+                Analyzing your closet items...
+              </Text>
+              <Text style={{ color: "rgba(255,255,255,0.7)", fontSize: 14, textAlign: "center" }}>
+                This may take 30-60 seconds
+              </Text>
+            </View>
+          </SafeAreaView>
+        </LinearGradient>
+      </Modal>
+
+      <LinearGradient colors={GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ flex: 1 }}>
+        <SafeAreaView style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={s.wrap}>
           {/* Logo */}
           <Image source={require("./assets/logo.png")} style={s.logo} resizeMode="contain" />
@@ -930,6 +1358,48 @@ Photography style: High quality fashion photography, studio lighting, full body 
               <Pressable onPress={openSaved} style={s.btnSmall}>
                 <Text style={s.btnText}>View Saved</Text>
               </Pressable>
+            </View>
+          </View>
+
+          {/* User Model Photo Section */}
+          <View style={[s.card, { marginBottom: 16 }]}>
+            <Text style={s.cardH}>Your Model Photo</Text>
+            <Text style={[s.cardP, { fontSize: 12, opacity: 0.9, marginBottom: 12 }]}>
+              {userModelPhoto 
+                ? "Your photo will be used for outfit try-ons. Upload a full-body photo for best results."
+                : "Add your photo to see how outfits look on you! Otherwise, we'll use an AI-generated model."}
+            </Text>
+            
+            {userModelPhoto ? (
+              <View style={{ alignItems: "center", marginBottom: 12 }}>
+                <Image 
+                  source={{ uri: userModelPhoto }} 
+                  style={{ width: 120, height: 160, borderRadius: 8, borderWidth: 2, borderColor: "rgba(255,255,255,0.3)" }}
+                  resizeMode="cover"
+                />
+              </View>
+            ) : null}
+            
+            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              {!userModelPhoto ? (
+                <>
+                  <Pressable onPress={captureUserModelPhoto} style={[s.btnSmall, { flex: 1, minWidth: 120 }]}>
+                    <Text style={s.btnText}>📷 Take Photo</Text>
+                  </Pressable>
+                  <Pressable onPress={pickUserModelPhoto} style={[s.btnSmall, { flex: 1, minWidth: 120 }]}>
+                    <Text style={s.btnText}>📁 Upload Photo</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <Pressable onPress={captureUserModelPhoto} style={[s.btnSmall, { flex: 1, minWidth: 100 }]}>
+                    <Text style={s.btnText}>Change</Text>
+                  </Pressable>
+                  <Pressable onPress={removeUserModelPhoto} style={[s.btnSmall, { backgroundColor: "rgba(255,0,0,0.4)", flex: 1, minWidth: 100 }]}>
+                    <Text style={s.btnText}>Remove</Text>
+                  </Pressable>
+                </>
+              )}
             </View>
           </View>
 
@@ -1061,7 +1531,13 @@ Photography style: High quality fashion photography, studio lighting, full body 
                   keyExtractor={(item) => item.id}
                   contentContainerStyle={{ paddingBottom: 24 }}
                   renderItem={({ item }) => (
-                    <Pressable onPress={() => setSelected(item)} style={stylesSaved.cardRow}>
+                    <Pressable 
+                      onPress={() => setSelected(item)} 
+                      style={[
+                        stylesSaved.cardRow,
+                        selected?.id === item.id && { backgroundColor: "rgba(255,255,255,0.6)" } // Much less transparent when selected for better text visibility
+                      ]}
+                    >
                       <Image source={{ uri: item.imageUri }} style={stylesSaved.thumb} />
                       <View style={{ flex: 1 }}>
                         <Text style={stylesSaved.title} numberOfLines={1}>
@@ -1121,7 +1597,8 @@ Photography style: High quality fashion photography, studio lighting, full body 
           </SafeAreaView>
         </LinearGradient>
       </Modal>
-    </LinearGradient>
+      </LinearGradient>
+    </>
   );
 }
 
@@ -1199,7 +1676,7 @@ const stylesSaved = StyleSheet.create({
   detail: {
     position: "absolute",
     left: 0, right: 0, bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "rgba(0,0,0,0.85)", // Much less transparent for better text visibility
     padding: 16,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16
